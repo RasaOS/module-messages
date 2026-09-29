@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/RasaOS/module-messages/blob/main/content/schemas/config.schema.json",
+  "title": "messages/messages.config.yml — rasa.module.messages (records-family/1)",
+  "description": "What a project declares to rasa.module.messages. Every key except `schema` is optional and a project with no config file is valid, except that writing as yourself (draft, reply, mark-sent, log --sent of a kind you compose) refuses until an identity is declared for the channel. Every list follows declare-to-constrain: absent or [] = free; non-empty = closed.",
+  "type": "object",
+  "x-kind": "config",
+  "x-key-order": [
+    "schema",
+    "channels",
+    "services",
+    "identities",
+    "labels",
+    "stale_after",
+    "timezone",
+    "actors",
+    "default_actor"
+  ],
+  "required": ["schema"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "rasa.module.messages/1"},
+    "channels": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "enum": ["email", "text", "chat", "voice", "post"]},
+      "description": "Declare to constrain: the channels this project keeps (email, text, chat, voice, post). Empty: all five."
+    },
+    "services": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "format": "slug"},
+      "description": "Declare to constrain: the chat services (slack, whatsapp, signal, teams, ...)."
+    },
+    "identities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "required": ["id", "channel", "address"],
+        "additionalProperties": false,
+        "x-key-order": ["id", "channel", "address", "card"],
+        "properties": {
+          "id": {"type": "string", "format": "slug"},
+          "channel": {"type": "string", "enum": ["email", "text", "chat", "voice", "post"]},
+          "address": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The literal address you write from on that channel."
+          },
+          "card": {
+            "type": "string",
+            "pattern": "^CARD-[0-9]{4,}$",
+            "description": "Your own contact card, when rasa.module.crm keeps one."
+          }
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"channel": {"const": "email"}}, "required": ["channel"]},
+            "then": {"properties": {"address": {"format": "email"}}}
+          },
+          {
+            "if": {"properties": {"channel": {"const": "text"}}, "required": ["channel"]},
+            "then": {"properties": {"address": {"format": "phone-or-email"}}}
+          },
+          {
+            "if": {"properties": {"channel": {"const": "chat"}}, "required": ["channel"]},
+            "then": {"properties": {"address": {"format": "chat-handle"}}}
+          },
+          {
+            "if": {"properties": {"channel": {"const": "voice"}}, "required": ["channel"]},
+            "then": {"properties": {"address": {"format": "phone"}}}
+          },
+          {
+            "if": {"properties": {"channel": {"const": "post"}}, "required": ["channel"]},
+            "then": {"properties": {"address": {"format": "text"}}}
+          }
+        ]
+      },
+      "description": "THE HARD-STOP: who you may write as, per channel. `messages draft`, `reply`, `mark-sent` and `log --sent` for a kind you can compose refuse until the channel has one."
+    },
+    "labels": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "format": "slug"},
+      "description": "Declare to constrain: thread labels."
+    },
+    "stale_after": {
+      "type": "integer",
+      "pattern": "^[1-9][0-9]{0,3}$",
+      "description": "Days after which a sent message with no answer shows as waiting. Default 7."
+    },
+    "timezone": {
+      "type": "string",
+      "format": "iana-tz",
+      "description": "The zone a wall-clock time given to the tool is read in ('2026-09-28 14:00'). Optional: times with an offset and 'now' need none."
+    },
+    "actors": {"type": "array", "uniqueItems": true, "items": {"type": "string", "format": "actor"}},
+    "default_actor": {"type": "string", "format": "actor"}
+  }
+}

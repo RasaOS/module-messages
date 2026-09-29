@@ -1,0 +1,156 @@
+{
+  "$schema": "https://rasa-os.github.io/schema/rasa.schema.v1.json",
+  "contract_version": "1.3.0",
+  "name": "rasa.module.messages",
+  "version": "0.1.0",
+  "kind": "module",
+  "aliases": [
+    "module-messages"
+  ],
+  "description": "Every kind of message, kept as records: email, texts (sms, mms, imessage, rcs), chat, phone calls, voicemail, letters and faxes, one file per message inside its thread's directory, grouped into five channels (email, text, chat, voice, post). The message KIND is the load-bearing axis — each kind has its own field law, expressed as JSON Schema blocks. The module records and drafts; it NEVER sends, fetches or syncs: drafts leave only as an .eml file for the person's own mail program, and imports read files the person hands over (.eml, mbox, SMS Backup & Restore XML for texts and the call log). Derived views — needs reply, unseen, waiting, missed calls, unheard voicemails, one person's timeline across every channel — are computed, never stored. Built to the records-family/1 standard shared with rasa.module.notes, rasa.module.schedule and rasa.module.crm: a strict-YAML frontmatter grammar, JSON Schemas as the field law, an atomic CLI (.claude/bin/messages) that writes every change with an append-only history line, and a validator (.claude/bin/check-messages) that enforces every numbered invariant. The one thing it refuses to guess — who you may write as — is the config's `identities`: drafting, replying, marking sent and recording sent messages hard-stop until the channel has one; whether the assistant is allowed to is the project-owned .claude/messages-gate.md seam. Not rasa.module.chat (the assistant's own chat surface).",
+  "source": {
+    "repo": "https://github.com/RasaOS/module-messages",
+    "branch": "main"
+  },
+  "tier": "Pro",
+  "capabilities": [
+    "messages.record",
+    "messages.drafts",
+    "messages.threads",
+    "messages.kinds",
+    "messages.calls-and-voicemail",
+    "messages.import-mail",
+    "messages.import-phone-backup",
+    "messages.export-eml",
+    "messages.derived-views",
+    "messages.person-timeline",
+    "messages.ledger-validation"
+  ],
+  "permissions": [
+    "fs:read",
+    "fs:write",
+    "shell:exec"
+  ],
+  "requires": {
+    "parent_kind": [
+      "domain",
+      "tenant"
+    ]
+  },
+  "rasa": {
+    "role": "L1-mountable-capability",
+    "shape_pattern": "toolkit",
+    "family": "records-family/1",
+    "note": "v0.1.0 is NEW (owner decisions 2026-09-28: 'we need modules for each of the following… messages', then mid-build 'module.messages needs to be able to handle a range of message types like text messages, emails, voicemails, etc.' and 'record + draft, never send'). Ten kinds in five channel directories: email (email), text (sms, mms, imessage, rcs), chat (chat, with a service), voice (call, voicemail — recorded, never drafted), post (letter, fax). Threads are directories messages/<channel>/THR-nnnn-<slug>/ holding THR-nnnn.md plus one MSG-nnnn.md per message and an attachments/ directory. Status draft -> sent | discarded, received arrives received; frozen once sent or received (only updated and seen change). Addresses are stored literally and resolved to rasa.module.crm cards at view time (read-only). Imports are stdlib-only and offline (email + mailbox; xml.etree for SMS Backup & Restore). Built to the rasa.module.tasks v1.0.0 standard: numbered invariants (F-01..F-27 family, M-01..M-16 messages), JSON Schemas under .claude/schemas/messages/, one atomic CLI, an append-only messages/history.tsv, and a validator. records.py (the family core) is byte-identical across notes/schedule/crm/messages; bin/check-manifest proves it. Sending, fetching and syncing belong to Connections (canon task SA-031), a future soft reference. Cross-references into crm/schedule/notes/tasks are SOFT: resolved when mounted, unverifiable-but-legal when not, never requires.elements[]. Skills are /message and /threads (not /inbox: rasa.domain.code ships one).",
+    "identity": {
+      "one_liner": "the RasaOS module for messages of every kind, kept as records",
+      "role": "module",
+      "subject": "email, texts, chat, calls, voicemail, letters and faxes — recorded and drafted, never sent",
+      "goal": "bring every conversation a person has into a project as structured, validated records they own"
+    }
+  },
+  "element": {
+    "description": "Element-owned files mirrored into the install target per canon ELEMENT_CONTRACT.md §7. Refreshed on every Element upgrade, so nothing here holds project state. The seam, the config and the messages/ ledger are NOT here — they are project-owned (see seed.files).",
+    "files": [
+      {
+        "from": "content/messages-rules.md",
+        "to": ".claude/messages-rules.md",
+        "policy": "file-replace",
+        "note": "The law: the records-family/1 conventions (identical in all four family modules) followed by the messages law — kinds and channels, threads, messages and their lifecycle, identities (the hard-stop), recording, import/export, the derived views, crm resolution. Every rule is marked with its invariant id or 'judgement'."
+      },
+      {
+        "from": "content/schemas/",
+        "to": ".claude/schemas/messages/",
+        "policy": "directory-mirror",
+        "note": "JSON Schemas (draft 2020-12 subset) for the thread, the message (its allOf blocks are the per-kind law, each tagged with the invariant it is reported under) and messages.config.yml. Both the interop artifact and the enforced field law: records.py evaluates them."
+      },
+      {
+        "from": "content/skills/",
+        "to": ".claude/skills/",
+        "policy": "directory-mirror",
+        "note": "The two messages skills — /message (record and draft) and /threads (read). Only names inside this module's vocabulary: directory-mirror overwrites same-named skills silently, and rasa.domain.code already ships /inbox."
+      },
+      {
+        "from": "content/bin/",
+        "to": ".claude/bin/",
+        "policy": "directory-mirror",
+        "note": "The two programs (messages, check-messages) and their package rasa_messages/ (records.py family core, model, validate, cli, mail, FAMILY). Pure standard library; no network, no process, no version control. Overlays .claude/bin/ without deleting other modules' programs."
+      },
+      {
+        "from": "content/README.md",
+        "to": "content/README.md",
+        "policy": "opt-in",
+        "note": "What this module ships and where each file lands. Author-time; not installed."
+      },
+      {
+        "from": "content/BUILD_PLAN.md",
+        "to": "content/BUILD_PLAN.md",
+        "policy": "opt-in",
+        "note": "The design record: why the kind is the axis, the records-family/1 decisions, the invariant map, what was deferred. Author-time; not installed."
+      }
+    ]
+  },
+  "seed": {
+    "description": "One-time, project-owned files copied at install only (skip-if-exists / init-only-with-sha), per canon ELEMENT_CONTRACT.md §7. They belong to the project the moment they land and are never overwritten by an Element upgrade.",
+    "files": [
+      {
+        "from": "seed/messages-gate.md.template",
+        "to": ".claude/messages-gate.md",
+        "policy": "skip-if-exists",
+        "note": "The judgement half of the seam: whose messages may be kept and with what consent, what may be kept about other people and for how long, which identities the assistant may write as, what 'needs a reply' means here. The machine half (identities, channels, services, labels) is in messages/messages.config.yml."
+      },
+      {
+        "from": "seed/messages/messages.config.yml.template",
+        "to": "messages/messages.config.yml",
+        "policy": "skip-if-exists",
+        "note": "What the project declares: identities (the hard-stop), the channel/service/label vocabularies (declare to constrain), stale_after, timezone, actors, default_actor."
+      },
+      {
+        "from": "seed/messages/history.tsv.template",
+        "to": "messages/history.tsv",
+        "policy": "skip-if-exists",
+        "note": "The append-only history log, header row only. Written by the messages tool, never by hand."
+      },
+      {
+        "from": "seed/messages/email/.keep",
+        "to": "messages/email/.keep",
+        "policy": "skip-if-exists",
+        "note": "The email channel directory (bin/init does not implement scaffold.directories, so directories ship as placeholders)."
+      },
+      {
+        "from": "seed/messages/text/.keep",
+        "to": "messages/text/.keep",
+        "policy": "skip-if-exists",
+        "note": "The text channel directory: sms, mms, imessage, rcs."
+      },
+      {
+        "from": "seed/messages/chat/.keep",
+        "to": "messages/chat/.keep",
+        "policy": "skip-if-exists",
+        "note": "The chat channel directory."
+      },
+      {
+        "from": "seed/messages/voice/.keep",
+        "to": "messages/voice/.keep",
+        "policy": "skip-if-exists",
+        "note": "The voice channel directory: calls and voicemail."
+      },
+      {
+        "from": "seed/messages/post/.keep",
+        "to": "messages/post/.keep",
+        "policy": "skip-if-exists",
+        "note": "The post channel directory: letters and faxes."
+      },
+      {
+        "from": "seed/rasa.lock.json.template",
+        "to": ".claude/rasa.lock.json",
+        "policy": "init-only-with-sha",
+        "note": "Stamped with the Element HEAD SHA at init; written only when absent. When co-installed under a parent that stamps its own lockfile, the parent's is authoritative (single-writer-per-path, Lock L-004)."
+      }
+    ]
+  },
+  "scaffold": {
+    "description": "bin/init does not implement scaffold.directories; the messages/ channel directories ship as seed .keep placeholders instead, so this stays empty rather than declaring something nothing performs.",
+    "directories": []
+  }
+}

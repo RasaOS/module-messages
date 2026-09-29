@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/RasaOS/module-messages/blob/main/content/schemas/thread.schema.json",
+  "title": "Thread — rasa.module.messages (records-family/1)",
+  "description": "A conversation: one directory messages/<channel>/THR-nnnn-<slug>/ holding this record (THR-nnnn.md, titled by its H1: the subject for email and letters, the people for texts, chat and calls), one file per message beside it, and an attachments/ directory. The channel is the directory the thread sits in; there is no channel key. Needs-reply, unseen and waiting are derived from the messages, never stored here.",
+  "type": "object",
+  "x-id-prefix": "THR",
+  "x-title": "required",
+  "x-key-order": [
+    "id",
+    "created",
+    "created_by",
+    "updated",
+    "participants",
+    "identity",
+    "labels",
+    "account",
+    "about",
+    "pinned"
+  ],
+  "x-refs": {"participants": {"field": "who", "prefixes": ["CARD"]}, "account": ["acct"], "about": ["*"]},
+  "required": ["id", "created", "created_by", "updated"],
+  "additionalProperties": false,
+  "patternProperties": {"^x-[a-z0-9][a-z0-9_-]*$": {}},
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^THR-[0-9]{4,}$",
+      "description": "Minted by the messages tool; never reused. The thread directory is named THR-nnnn-<slug> and holds this record as THR-nnnn.md."
+    },
+    "created": {"type": "string", "format": "date"},
+    "created_by": {"type": "string", "format": "actor"},
+    "updated": {
+      "type": "string",
+      "format": "date",
+      "description": "Bumped by every tool edit; `messages touch` after a hand edit."
+    },
+    "participants": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["who"],
+        "additionalProperties": false,
+        "x-key-order": ["who", "name"],
+        "properties": {
+          "who": {
+            "type": "string",
+            "minLength": 1,
+            "not": {
+              "pattern": "^(?:(?:NOTE|DEC|EVT|LEAD|THR|MSG)-[0-9]{4,}|acct-[a-z0-9]+(?:-[a-z0-9]+)*|TASK-\\S+)$"
+            },
+            "x-not-message": "a participant is an address or a CARD id, never another kind of record",
+            "description": "The address the conversation is with, as used (or a CARD id). Its form must suit the thread's channel."
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "A display name as the message or the file carried it. Contact cards are resolved at view time, never copied in."
+          }
+        }
+      },
+      "description": "The other people in the conversation (never your own identities). Kept by the tool as messages are added."
+    },
+    "identity": {
+      "type": "string",
+      "format": "slug",
+      "description": "Which of your declared identities (config `identities[].id`) this conversation is conducted as. Replies default to it."
+    },
+    "labels": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "format": "slug"},
+      "description": "Many-to-many labels. Declare to constrain: config `labels`."
+    },
+    "account": {
+      "type": "string",
+      "pattern": "^acct-[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "description": "The business account the conversation belongs to (rasa.module.crm)."
+    },
+    "about": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "format": "family-ref"},
+      "description": "What the conversation is about: any family record (EVT-, LEAD-, NOTE-, TASK-...)."
+    },
+    "pinned": {"type": "boolean", "const": "true", "description": "Only ever `true`; an unpinned thread omits the key."}
+  }
+}

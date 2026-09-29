@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+#
+# bin/init — minimal canonical installer for a RasaOS `module` Element.
+#
+# Usage:
+#   bin/init [target-dir]
+#
+# If [target-dir] is omitted, the current working directory is used.
+#
+# This script is the Element-primitive installer per canon
+# ELEMENT_CONTRACT.md §7 (install policies). What gets installed
+# is declared entirely in rasa.json — this script holds NO
+# hardcoded file list. It reads the Connection Contract and applies
+# each entry in element.files[] and seed.files[] by its declared
+# policy.
+#
+# For rasa.module.messages: element.files[] installs the rules, the JSON
+# Schemas, the two skills and the two programs (.claude/bin/messages,
+# .claude/bin/check-messages); seed.files[] copies the project-owned seam,
+# the messages/ ledger scaffold (config, history header, and the five
+# channel directories email/ text/ chat/ voice/ post/) and stamps the
+# lockfile. Nothing already in the project is overwritten except the
+# Element-owned files it installed before.
+#
+# Fails loudly. A missing source, an unknown policy, or a `to` path
+# that escapes the target is an error, not a warning — a partial
+# install must never exit 0.
+
+set -euo pipefail
+
+# ---------- Paths + args ----------
+
+ELEMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+TARGET_RAW="${1:-$(pwd)}"
+if [[ ! -d "$TARGET_RAW" ]]; then
+  echo "✗ Target directory does not exist: $TARGET_RAW" >&2
+  exit 1
+fi
+TARGET="$(cd "$TARGET_RAW" && pwd -P)"
+
+# Refuse to install into the Element itself, or anywhere beneath it.
+# Both paths are fully resolved (pwd -P), so a symlinked target cannot
+# slip past this guard.
+if [[ "$TARGET" == "$ELEMENT_DIR" || "$TARGET" == "$ELEMENT_DIR"/* ]]; then
+  echo "✗ Refusing to install into the Element's own folder (or a subfolder of it)." >&2
+  echo "  Per ELEMENT_CONTRACT — Elements don't install into themselves." >&2
+  echo "  element: $ELEMENT_DIR" >&2
+  echo "  target:  $TARGET" >&2
+  exit 1
+fi
+
+# ---------- Read rasa.json ----------
+
+MANIFEST="$ELEMENT_DIR/rasa.json"
+
+if [[ ! -f "$MANIFEST" ]]; then
+  echo "✗ rasa.json not found at $MANIFEST" >&2
+  exit 1
+fi
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "✗ bin/init requires python3 on PATH." >&2; exit 1; }
+
+# Resolve Element identity in ONE pass. The manifest path is passed as
+# argv — never interpolated into a Python string literal (a quote or an
+# apostrophe in the path would be a syntax error at best, and arbitrary
+# code execution at worst).
+_meta="$(python3 - "$MANIFEST" <<'PYEOF'
+import json, sys
+m = json.load(open(sys.argv[1]))
+src = m.get('source') or {}
+for v in (m.get('name',''), m.get('kind',''), m.get('version',''),
+          src.get('repo',''), src.get('branch',''),
+          str(len((m.get('element') or {}).get('files') or [])),
+          str(len((m.get('seed') or {}).get('files') or []))):
+    print(v)
+PYEOF
+)"
+{
+  read -r ELEMENT_NAME
+  read -r ELEMENT_KIND
+  read -r ELEMENT_VERSION
+  read -r ELEMENT_REPO
+  read -r ELEMENT_BRANCH
+  read -r count_elem
+  read -r count_seed
+} <<< "$_meta"
+
+# Resolve current Element SHA.
+#
+# `rev-parse HEAD` is the wrong idiom here: in a repo with no commits it
+# prints "HEAD" on stdout AND exits non-zero, so a `|| echo uncommitted`
+# fallback appends a SECOND line and the stamped lockfile ends up with a
+# raw newline inside a JSON string — invalid JSON. Every Element freshly
+# created by `bin/new-element` (git init, no commit yet) hits that.
+# `--verify --quiet` prints nothing and exits 1 when HEAD is unresolvable.
+ELEMENT_SHA="$(git -C "$ELEMENT_DIR" rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+if [[ -z "$ELEMENT_SHA" || "$ELEMENT_SHA" == *[!0-9a-f]* ]]; then
+  ELEMENT_SHA="uncommitted"
+fi
+TODAY="$(date -u +%Y-%m-%d)"
+
+echo "→ Installing $ELEMENT_NAME @ $ELEMENT_VERSION ($ELEMENT_SHA)"
+echo "  into: $TARGET"
+echo ""
+
+# ---------- Apply element.files[] ----------
+
+if [[ "$count_elem" -eq 0 ]]; then
+  echo "  element.files[] empty — nothing Element-owned to mirror."
+else
+  echo "  Applying $count_elem element.files[] entries..."
+  python3 - "$MANIFEST" "$ELEMENT_DIR" "$TARGET" <<'PYEOF'
+import json, os, shutil, sys
+
+manifest_path, element_dir, target = sys.argv[1], sys.argv[2], sys.argv[3]
+manifest = json.load(open(manifest_path))
+errors = []
+
+
+def resolved(dst):
+    """Absolute dst, asserted to stay inside the target tree.
+
+    os.path.join(target, '/etc/passwd') silently discards `target`, so an
+    absolute or ../-bearing `to` would write anywhere on the filesystem.
+    """
+    full = os.path.realpath(os.path.join(target, dst))
+    root = os.path.realpath(target)
+    if full != root and not full.startswith(root + os.sep):
+        return None
+    return full
+
+
+for entry in manifest.get('element', {}).get('files', []):
+    policy = entry['policy']
+    if policy == 'opt-in':
+        continue  # registered but not installed — create nothing in the target
+
+    src = os.path.join(element_dir, entry['from'])
+    dst = resolved(entry['to'])
+    if dst is None:
+        errors.append("'to' escapes the target tree: %s" % entry['to'])
+        continue
+    if not os.path.exists(src):
+        errors.append("declared 'from' does not exist: %s" % entry['from'])
+        continue
+
+    if policy == 'directory-mirror':
+        if not os.path.isdir(src):
+            errors.append("directory-mirror 'from' is not a directory: %s" % entry['from'])
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        # never ship bytecode or editor cruft, whatever is on the author's disk
+        shutil.copytree(src, dst, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"))
+        print("    · mirror: %s" % entry['to'])
+    elif policy == 'file-replace':
+        if not os.path.isfile(src):
+            errors.append("file-replace 'from' is not a file: %s" % entry['from'])
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+        print("    · replace: %s" % entry['to'])
+    else:
+        errors.append("unknown element.files[] policy %r for %s" % (policy, entry['from']))
+
+if errors:
+    for e in errors:
+        print("  ✗ %s" % e, file=sys.stderr)
+    sys.exit(1)
+PYEOF
+fi
+
+# ---------- Apply seed.files[] ----------
+
+if [[ "$count_seed" -eq 0 ]]; then
+  echo "  seed.files[] empty — no one-time files to copy."
+else
+  echo "  Applying $count_seed seed.files[] entries..."
+  python3 - "$MANIFEST" "$ELEMENT_DIR" "$TARGET" \
+    "$ELEMENT_NAME" "$ELEMENT_KIND" "$ELEMENT_VERSION" \
+    "$ELEMENT_REPO" "$ELEMENT_BRANCH" "$ELEMENT_SHA" "$TODAY" <<'PYEOF'
+import json, os, shutil, sys
+
+(manifest_path, element_dir, target,
+ elem_name, elem_kind, elem_version,
+ elem_repo, elem_branch, elem_sha, today) = sys.argv[1:11]
+
+manifest = json.load(open(manifest_path))
+errors = []
+
+subs = {
+    '{{ELEMENT_NAME}}':    elem_name,
+    '{{ELEMENT_KIND}}':    elem_kind,
+    '{{ELEMENT_VERSION}}': elem_version,
+    '{{ELEMENT_REPO}}':    elem_repo,
+    '{{ELEMENT_BRANCH}}':  elem_branch,
+    '{{ELEMENT_SHA}}':     elem_sha,
+    '{{TODAY}}':           today,
+}
+
+
+def resolved(dst):
+    full = os.path.realpath(os.path.join(target, dst))
+    root = os.path.realpath(target)
+    if full != root and not full.startswith(root + os.sep):
+        return None
+    return full
+
+
+for entry in manifest.get('seed', {}).get('files', []):
+    policy = entry['policy']
+    src = os.path.join(element_dir, entry['from'])
+    dst = resolved(entry['to'])
+    if dst is None:
+        errors.append("'to' escapes the target tree: %s" % entry['to'])
+        continue
+    if not os.path.isfile(src):
+        errors.append("declared seed 'from' is not a file: %s" % entry['from'])
+        continue
+
+    # Both one-shot policies are non-destructive: an existing target is the
+    # project's, and the project's copy always wins. A lockfile carrying
+    # overrides[] must survive a re-init.
+    if policy in ('skip-if-exists', 'init-only-with-sha') and os.path.exists(dst):
+        print("    · skip (exists): %s" % entry['to'])
+        continue
+
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+
+    if policy == 'init-only-with-sha':
+        with open(src) as f:
+            content = f.read()
+        for k, v in subs.items():
+            content = content.replace(k, v)
+        # A stamped .json that does not parse is a silent, load-bearing
+        # corruption (a malformed rasa.lock.json breaks every downstream
+        # reader). Catch it here rather than shipping it.
+        if entry['to'].endswith('.json'):
+            try:
+                json.loads(content)
+            except ValueError as exc:
+                errors.append("stamped %s is not valid JSON (%s)" % (entry['to'], exc))
+                continue
+        with open(dst, 'w') as f:
+            f.write(content)
+        print("    · stamp: %s" % entry['to'])
+    elif policy == 'skip-if-exists':
+        shutil.copy2(src, dst)
+        print("    · copy: %s" % entry['to'])
+    else:
+        errors.append("unknown seed.files[] policy %r for %s" % (policy, entry['from']))
+
+if errors:
+    for e in errors:
+        print("  ✗ %s" % e, file=sys.stderr)
+    sys.exit(1)
+PYEOF
+fi
+
+echo ""
+echo "✓ $ELEMENT_NAME @ $ELEMENT_VERSION installed into $TARGET"
+echo "  Ledger:   $TARGET/messages/          (your threads and messages — project-owned)"
+echo "  Rules:    $TARGET/.claude/messages-rules.md"
+echo "  Tools:    $TARGET/.claude/bin/messages   $TARGET/.claude/bin/check-messages"
+echo "  Seam:     $TARGET/.claude/messages-gate.md + messages/messages.config.yml"
+echo "            ← declare your identities before drafting (the tools never send)"
+echo "  Lockfile: $TARGET/.claude/rasa.lock.json"

@@ -1,0 +1,14 @@
+# macOS / editor cruft
+.DS_Store
+._*
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Temp install artifacts
+.claude/rasa.lock.json
+
+# Python bytecode (the tools never write it; belt and braces)
+__pycache__/
+*.pyc

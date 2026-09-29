@@ -1,0 +1,85 @@
+# Messages gate — this project's seam for rasa.module.messages
+
+This file is **project-owned**. `rasa.module.messages` copied it once at
+install (`skip-if-exists`) and will never overwrite it. It holds the
+judgement the module cannot make for you: **whose messages may be kept here,
+what may be kept about other people and for how long, who the assistant may
+write as, and what "needs a reply" means in this project.**
+
+The machine half of the seam — your identities, the channels, services and
+labels — lives in `messages/messages.config.yml`, because the tools check
+it. The tools **hard-stop** until an identity is declared for a channel:
+guessing who you may write as is the one inference this module refuses to
+make. Declaring an identity makes writing *possible*; this file says whether
+it is *allowed*.
+
+The module records and drafts. It never sends anything; nothing here can
+change that.
+
+Fill in the sections. Honest defaults are shown; replace them.
+
+---
+
+## 1. Whose messages may be kept, and with what consent
+
+Name whose conversations this project records, and on what basis. Examples:
+
+- a household: the family's own email, texts and calls; nobody else's
+  phone or mailbox.
+- a firm: correspondence on a client matter, under the engagement letter;
+  personal messages never.
+- a clinic: messages with patients only as the clinic's records policy
+  allows, and never a recording made without the other party's consent
+  where the law requires it.
+
+> _Default until you replace it: only messages the person running the
+> assistant sent or received themselves, imported or recorded at their own
+> request._
+
+## 2. What may be kept about other people, and for how long
+
+These records hold other people's words, numbers and addresses. Say what is
+kept (whole messages? summaries? calls without notes?), what is never kept
+(health details, account numbers, passwords sent by text, one-time codes),
+and when a thread is archived or erased.
+
+> _Default: keep messages whole; never keep one-time codes or passwords —
+> discard such texts instead of importing them; archive threads that have
+> been quiet for a year. Erasing personal data (a legal request, a
+> relationship ended) is done deliberately, outside the tools, and noted
+> here._
+
+## 3. Who the assistant may write as
+
+For each identity in `messages.config.yml`, say whether the assistant may
+draft as it, and whether it may record a draft as sent (`mark-sent`) — which
+should only ever follow a real send, done by a person, from their own
+program.
+
+| identity | may draft | may mark sent | notes |
+|---|---|---|---|
+| _(none declared yet)_ | | | |
+
+> _Default: the assistant may draft as any declared identity when asked;
+> it marks a message sent only when the person says they sent it._
+
+## 4. What "needs a reply" means here
+
+The tools list a thread as needing a reply when the last thing that
+happened in it came in. That is a starting list, not a verdict. Say what
+does and does not count here, and how fast.
+
+> _Default: newsletters, receipts, automated notices and one-time codes
+> never need a reply. A missed call or a voicemail from a person does —
+> within a day. Everything else from a person, within three days._
+
+## 5. Hard gates (optional)
+
+Anything that must be true before the assistant drafts or records a
+message, which it must check and refuse without. Example (a firm):
+
+> Before drafting to anyone outside the firm on a client matter, confirm
+> the matter number and that the recipient is on the matter's contact list.
+> Never draft as a partner's identity.
+
+> _None declared._

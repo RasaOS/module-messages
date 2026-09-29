@@ -1,0 +1,431 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/RasaOS/module-messages/blob/main/content/schemas/message.schema.json",
+  "title": "Message — rasa.module.messages (records-family/1)",
+  "description": "One message of any kind — an email, a text, a chat message, a call, a voicemail, a letter, a fax — as one file inside its thread directory: messages/<channel>/THR-nnnn-<slug>/MSG-nnnn.md. The body is the message (the transcript for a voicemail, call notes for a call); there is no title. FROZEN once sent or received: only `updated` and `seen` may change. The allOf blocks are the kind law; each carries the invariant it is reported under (x-invariant). Cross-record law (threads, identities, history) is in .claude/messages-rules.md.",
+  "type": "object",
+  "x-id-prefix": "MSG",
+  "x-title": "none",
+  "x-frozen": "when status is sent or received",
+  "x-mutable-when-frozen": ["updated", "seen"],
+  "x-key-order": [
+    "id",
+    "created",
+    "created_by",
+    "updated",
+    "kind",
+    "status",
+    "at",
+    "from",
+    "to",
+    "cc",
+    "bcc",
+    "service",
+    "outcome",
+    "duration",
+    "transcript",
+    "in_reply_to",
+    "external_id",
+    "attachments",
+    "seen"
+  ],
+  "x-refs": {"from": ["CARD"], "to": ["CARD"], "cc": ["CARD"], "bcc": ["CARD"], "in_reply_to": ["MSG"]},
+  "required": ["id", "created", "created_by", "updated", "kind", "status"],
+  "additionalProperties": false,
+  "patternProperties": {"^x-[a-z0-9][a-z0-9_-]*$": {}},
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^MSG-[0-9]{4,}$",
+      "description": "Minted by the messages tool; never reused."
+    },
+    "created": {
+      "type": "string",
+      "format": "date",
+      "description": "The day the record was made (not when the message happened: that is `at`)."
+    },
+    "created_by": {"type": "string", "format": "actor"},
+    "updated": {
+      "type": "string",
+      "format": "date",
+      "description": "Bumped by every tool edit; `messages touch` after a hand edit."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["email", "sms", "mms", "imessage", "rcs", "chat", "call", "voicemail", "letter", "fax"],
+      "description": "What kind of message. Fixed module vocabulary: each kind has its own field law (the allOf blocks below) and belongs to one channel."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "sent", "received", "discarded"],
+      "description": "draft -> sent or draft -> discarded; received arrives received. Direction is derived: draft/sent/discarded are outgoing, received is incoming. Frozen once sent or received."
+    },
+    "at": {
+      "type": "string",
+      "format": "date-or-date-time",
+      "description": "When it happened: RFC 3339 with the offset it was sent or received in. A bare day only for a letter. Required once sent or received; never on a draft."
+    },
+    "from": {
+      "type": "string",
+      "minLength": 1,
+      "not": {"pattern": "^(?:(?:NOTE|DEC|EVT|LEAD|THR|MSG)-[0-9]{4,}|acct-[a-z0-9]+(?:-[a-z0-9]+)*|TASK-\\S+)$"},
+      "x-not-message": "a person is an address or a CARD id, never another kind of record",
+      "description": "Who it is from, as the address actually used (or a CARD id when no address is known). On a draft or a sent message you could compose, a declared identity's address."
+    },
+    "to": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "not": {"pattern": "^(?:(?:NOTE|DEC|EVT|LEAD|THR|MSG)-[0-9]{4,}|acct-[a-z0-9]+(?:-[a-z0-9]+)*|TASK-\\S+)$"},
+        "x-not-message": "a person is an address or a CARD id, never another kind of record"
+      },
+      "description": "Who it is to, as the addresses actually used."
+    },
+    "cc": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "not": {"pattern": "^(?:(?:NOTE|DEC|EVT|LEAD|THR|MSG)-[0-9]{4,}|acct-[a-z0-9]+(?:-[a-z0-9]+)*|TASK-\\S+)$"},
+        "x-not-message": "a person is an address or a CARD id, never another kind of record"
+      },
+      "description": "Copied (email, letter)."
+    },
+    "bcc": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "not": {"pattern": "^(?:(?:NOTE|DEC|EVT|LEAD|THR|MSG)-[0-9]{4,}|acct-[a-z0-9]+(?:-[a-z0-9]+)*|TASK-\\S+)$"},
+        "x-not-message": "a person is an address or a CARD id, never another kind of record"
+      },
+      "description": "Blind-copied (email)."
+    },
+    "service": {
+      "type": "string",
+      "format": "slug",
+      "description": "The chat service (slack, whatsapp, signal, teams, ...). Chat only; declare to constrain: config `services`."
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["answered", "missed", "declined", "busy", "failed", "voicemail", "blocked"],
+      "description": "How a call went. Call only; required on a call."
+    },
+    "duration": {
+      "type": "string",
+      "format": "duration",
+      "pattern": "^P",
+      "description": "How long (ISO 8601, e.g. PT4M12S). Calls (required when answered) and voicemails."
+    },
+    "transcript": {
+      "type": "string",
+      "enum": ["machine", "human"],
+      "description": "Who wrote a voicemail's transcript (the body): a machine or a person. Required exactly when the body is not empty."
+    },
+    "in_reply_to": {
+      "type": "string",
+      "pattern": "^MSG-[0-9]{4,}$",
+      "description": "The earlier message in the same thread this one answers."
+    },
+    "external_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 998,
+      "description": "The id the message carried outside this ledger (an email Message-ID, a platform id, or a stable id made on import). Unique: the import dedupe key."
+    },
+    "attachments": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "path", "role"],
+        "additionalProperties": false,
+        "x-key-order": ["name", "path", "role"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1, "description": "The file's original name."},
+          "path": {
+            "type": "string",
+            "pattern": "^attachments/(?!\\.\\.?$)[^/]+$",
+            "description": "Relative to the thread directory: attachments/<MSG-id>-<name>."
+          },
+          "role": {
+            "type": "string",
+            "enum": ["file", "image", "audio", "video", "recording", "scan", "page"],
+            "description": "What the file is to the message; each kind allows its own roles."
+          }
+        }
+      },
+      "description": "Files kept in the thread's attachments/ directory, referenced by path."
+    },
+    "seen": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When a received message was read or heard (triage state). Received messages only; stamped by `messages seen`."
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "M-05: a message that happened has a moment; a draft has none.",
+      "x-invariant": "M-05",
+      "if": {"properties": {"status": {"enum": ["sent", "received"]}}, "required": ["status"]},
+      "then": {"required": ["at"]},
+      "else": {
+        "not": {"required": ["at"]},
+        "x-not-message": "a draft (or a discarded draft) has no 'at': it has not happened"
+      }
+    },
+    {
+      "$comment": "M-05: a received message is from someone.",
+      "x-invariant": "M-05",
+      "if": {"properties": {"status": {"const": "received"}}, "required": ["status"]},
+      "then": {"required": ["from"]}
+    },
+    {
+      "$comment": "M-05: a draft or a sent message is to someone.",
+      "x-invariant": "M-05",
+      "if": {"properties": {"status": {"enum": ["draft", "sent"]}}, "required": ["status"]},
+      "then": {"required": ["to"]}
+    },
+    {
+      "$comment": "M-06: only a kind you can compose is ever a draft.",
+      "x-invariant": "M-06",
+      "if": {"properties": {"kind": {"enum": ["call", "voicemail"]}}, "required": ["kind"]},
+      "then": {"properties": {"status": {"enum": ["sent", "received"]}}}
+    },
+    {
+      "$comment": "M-11: a draft, or a sent message you composed, is from you (an identity; checked against the config by the validator).",
+      "x-invariant": "M-11",
+      "if": {
+        "properties": {
+          "status": {"enum": ["draft", "sent"]},
+          "kind": {"enum": ["email", "sms", "mms", "imessage", "rcs", "chat", "letter", "fax"]}
+        },
+        "required": ["status", "kind"]
+      },
+      "then": {"required": ["from"]}
+    },
+    {
+      "$comment": "M-15: `seen` is triage state for incoming messages only.",
+      "x-invariant": "M-15",
+      "if": {"required": ["seen"]},
+      "then": {"properties": {"status": {"const": "received"}}}
+    },
+    {
+      "$comment": "M-04: kind email (channel email) — an email; the thread's H1 is the subject",
+      "x-invariant": "M-04",
+      "if": {"properties": {"kind": {"const": "email"}}, "required": ["kind"]},
+      "then": {
+        "properties": {
+          "from": {"format": "email-or-ref"},
+          "to": {"items": {"format": "email-or-ref"}},
+          "cc": {"items": {"format": "email-or-ref"}},
+          "bcc": {"items": {"format": "email-or-ref"}},
+          "at": {"format": "date-time"},
+          "attachments": {"items": {"properties": {"role": {"enum": ["file", "image", "audio", "video"]}}}}
+        },
+        "allOf": [
+          {"not": {"required": ["service"]}, "x-not-message": "an email has no 'service'"},
+          {"not": {"required": ["outcome"]}, "x-not-message": "an email has no 'outcome'"},
+          {"not": {"required": ["duration"]}, "x-not-message": "an email has no 'duration'"},
+          {"not": {"required": ["transcript"]}, "x-not-message": "an email has no 'transcript'"}
+        ]
+      }
+    },
+    {
+      "$comment": "M-04: kind sms (channel text) — a plain text message; no attachments",
+      "x-invariant": "M-04",
+      "if": {"properties": {"kind": {"const": "sms"}}, "required": ["kind"]},
+      "then": {
+        "properties": {
+          "from": {"format": "phone-or-sender-or-ref"},
+          "to": {"items": {"format": "phone-or-sender-or-ref"}},
+          "at": {"format": "date-time"}
+        },
+        "allOf": [
+          {"not": {"required": ["cc"]}, "x-not-message": "a sms has no 'cc'"},
+          {"not": {"required": ["bcc"]}, "x-not-message": "a sms has no 'bcc'"},
+          {"not": {"required": ["attachments"]}, "x-not-message": "a sms has no 'attachments'"},
+          {"not": {"required": ["service"]}, "x-not-message": "a sms has no 'service'"},
+          {"not": {"required": ["outcome"]}, "x-not-message": "a sms has no 'outcome'"},
+          {"not": {"required": ["duration"]}, "x-not-message": "a sms has no 'duration'"},
+          {"not": {"required": ["transcript"]}, "x-not-message": "a sms has no 'transcript'"}
+        ]
+      }
+    },
+    {
+      "$comment": "M-04: kind mms (channel text) — a text message carrying media",
+      "x-invariant": "M-04",
+      "if": {"properties": {"kind": {"const": "mms"}}, "required": ["kind"]},
+      "then": {
+        "properties": {
+          "from": {"format": "phone-or-sender-or-ref"},
+          "to": {"items": {"format": "phone-or-sender-or-ref"}},
+          "at": {"format": "date-time"},
+          "attachments": {"items": {"properties": {"role": {"enum": ["file", "image", "audio", "video"]}}}}
+        },
+        "allOf": [
+          {"not": {"required": ["cc"]}, "x-not-message": "a mms has no 'cc'"},
+          {"not": {"required": ["bcc"]}, "x-not-message": "a mms has no 'bcc'"},
+          {"not": {"required": ["service"]}, "x-not-message": "a mms has no 'service'"},
+          {"not": {"required": ["outcome"]}, "x-not-message": "a mms has no 'outcome'"},
+          {"not": {"required": ["duration"]}, "x-not-message": "a mms has no 'duration'"},
+          {"not": {"required": ["transcript"]}, "x-not-message": "a mms has no 'transcript'"}
+        ]
+      }
+    },
+    {
+      "$comment": "M-04: kind imessage (channel text) — a message over a phone number or an email address",
+      "x-invariant": "M-04",
+      "if": {"properties": {"kind": {"const": "imessage"}}, "required": ["kind"]},
+      "then": {
+        "properties": {
+          "from": {"format": "phone-or-email-or-ref"},
+          "to": {"items": {"format": "phone-or-email-or-ref"}},
+          "at": {"format": "date-time"},
+          "attachments": {"items": {"properties": {"role": {"enum": ["file", "image", "audio", "video"]}}}}
+        },
+        "allOf": [
+          {"not": {"required": ["cc"]}, "x-not-message": "an imessage has no 'cc'"},
+          {"not": {"required": ["bcc"]}, "x-not-message": "an imessage has no 'bcc'"},
+          {"not": {"required": ["service"]}, "x-not-message": "an imessage has no 'service'"},
+          {"not": {"required": ["outcome"]}, "x-not-message": "an imessage has no 'outcome'"},
+          {"not": {"required": ["duration"]}, "x-not-message": "an imessage has no 'duration'"},
+          {"not": {"required": ["transcript"]}, "x-not-message": "an imessage has no 'transcript'"}
+        ]
+      }
+    },
+    {
+      "$comment": "M-04: kind rcs (channel text) — a rich text message",
+      "x-invariant": "M-04",
+      "if": {"properties": {"kind": {"const": "rcs"}}, "required": ["kind"]},
+      "then": {
+        "properties": {
+          "from": {"format": "phone-or-sender-or-ref"},
+          "to": {"items": {"format": "phone-or-sender-or-ref"}},
+          "at": {"format": "date-time"},
+          "attachments": {"items": {"properties": {"role": {"enum": ["file", "image", "audio", "video"]}}}}
+        },
+        "allOf": [
+          {"not": {"required": ["cc"]}, "x-not-message": "a rcs has no 'cc'"},
+          {"not": {"required": ["bcc"]}, "x-not-message": "a rcs has no 'bcc'"},
+          {"not": {"required": ["service"]}, "x-not-message": "a rcs has no 'service'"},
+          {"not": {"required": ["outcome"]}, "x-not-message": "a rcs has no 'outcome'"},
+          {"not": {"required": ["duration"]}, "x-not-message": "a rcs has no 'duration'"},
+          {"not": {"required": ["transcript"]}, "x-not-message": "a rcs has no 'transcript'"}
+        ]
+      }
+    },
+    {
+      "$comment": "M-04: kind chat (channel chat) — a message on a chat service, addressed <service>:<handle>",
+      "x-invariant": "M-04",
+      "if": {"properties": {"kind": {"const": "chat"}}, "required": ["kind"]},
+      "then": {
+        "properties": {
+          "from": {"format": "chat-handle-or-ref"},
+          "to": {"items": {"format": "chat-handle-or-ref"}},
+          "at": {"format": "date-time"},
+          "attachments": {"items": {"properties": {"role": {"enum": ["file", "image", "audio", "video"]}}}}
+        },
+        "required": ["service"],
+        "allOf": [
+          {"not": {"required": ["cc"]}, "x-not-message": "a chat has no 'cc'"},
+          {"not": {"required": ["bcc"]}, "x-not-message": "a chat has no 'bcc'"},
+          {"not": {"required": ["outcome"]}, "x-not-message": "a chat has no 'outcome'"},
+          {"not": {"required": ["duration"]}, "x-not-message": "a chat has no 'duration'"},
+          {"not": {"required": ["transcript"]}, "x-not-message": "a chat has no 'transcript'"}
+        ]
+      }
+    },
+    {
+      "$comment": "M-04: kind call (channel voice) — a phone call; the body is call notes",
+      "x-invariant": "M-04",
+      "if": {"properties": {"kind": {"const": "call"}}, "required": ["kind"]},
+      "then": {
+        "properties": {
+          "from": {"format": "phone-or-ref"},
+          "to": {"items": {"format": "phone-or-ref"}},
+          "at": {"format": "date-time"},
+          "attachments": {"maxItems": 1, "items": {"properties": {"role": {"enum": ["recording"]}}}}
+        },
+        "required": ["outcome"],
+        "allOf": [
+          {"not": {"required": ["cc"]}, "x-not-message": "a call has no 'cc'"},
+          {"not": {"required": ["bcc"]}, "x-not-message": "a call has no 'bcc'"},
+          {"not": {"required": ["service"]}, "x-not-message": "a call has no 'service'"},
+          {"not": {"required": ["transcript"]}, "x-not-message": "a call has no 'transcript'"},
+          {
+            "if": {"properties": {"outcome": {"const": "answered"}}, "required": ["outcome"]},
+            "then": {"required": ["duration"]}
+          }
+        ]
+      }
+    },
+    {
+      "$comment": "M-04: kind voicemail (channel voice) — a voicemail; the body is its transcript, the audio an attachment",
+      "x-invariant": "M-04",
+      "if": {"properties": {"kind": {"const": "voicemail"}}, "required": ["kind"]},
+      "then": {
+        "properties": {
+          "from": {"format": "phone-or-ref"},
+          "to": {"items": {"format": "phone-or-ref"}},
+          "at": {"format": "date-time"},
+          "attachments": {"maxItems": 1, "items": {"properties": {"role": {"enum": ["audio"]}}}}
+        },
+        "allOf": [
+          {"not": {"required": ["cc"]}, "x-not-message": "a voicemail has no 'cc'"},
+          {"not": {"required": ["bcc"]}, "x-not-message": "a voicemail has no 'bcc'"},
+          {"not": {"required": ["service"]}, "x-not-message": "a voicemail has no 'service'"},
+          {"not": {"required": ["outcome"]}, "x-not-message": "a voicemail has no 'outcome'"}
+        ]
+      }
+    },
+    {
+      "$comment": "M-04: kind letter (channel post) — a letter on paper; scans as attachments",
+      "x-invariant": "M-04",
+      "if": {"properties": {"kind": {"const": "letter"}}, "required": ["kind"]},
+      "then": {
+        "properties": {
+          "from": {"format": "text-or-ref"},
+          "to": {"items": {"format": "text-or-ref"}},
+          "cc": {"items": {"format": "text-or-ref"}},
+          "attachments": {"items": {"properties": {"role": {"enum": ["scan", "image", "file"]}}}}
+        },
+        "allOf": [
+          {"not": {"required": ["bcc"]}, "x-not-message": "a letter has no 'bcc'"},
+          {"not": {"required": ["service"]}, "x-not-message": "a letter has no 'service'"},
+          {"not": {"required": ["outcome"]}, "x-not-message": "a letter has no 'outcome'"},
+          {"not": {"required": ["duration"]}, "x-not-message": "a letter has no 'duration'"},
+          {"not": {"required": ["transcript"]}, "x-not-message": "a letter has no 'transcript'"}
+        ]
+      }
+    },
+    {
+      "$comment": "M-04: kind fax (channel post) — a fax; pages as attachments",
+      "x-invariant": "M-04",
+      "if": {"properties": {"kind": {"const": "fax"}}, "required": ["kind"]},
+      "then": {
+        "properties": {
+          "from": {"format": "phone-or-ref"},
+          "to": {"items": {"format": "phone-or-ref"}},
+          "at": {"format": "date-time"},
+          "attachments": {"items": {"properties": {"role": {"enum": ["page", "file"]}}}}
+        },
+        "allOf": [
+          {"not": {"required": ["cc"]}, "x-not-message": "a fax has no 'cc'"},
+          {"not": {"required": ["bcc"]}, "x-not-message": "a fax has no 'bcc'"},
+          {"not": {"required": ["service"]}, "x-not-message": "a fax has no 'service'"},
+          {"not": {"required": ["outcome"]}, "x-not-message": "a fax has no 'outcome'"},
+          {"not": {"required": ["duration"]}, "x-not-message": "a fax has no 'duration'"},
+          {"not": {"required": ["transcript"]}, "x-not-message": "a fax has no 'transcript'"}
+        ]
+      }
+    }
+  ]
+}

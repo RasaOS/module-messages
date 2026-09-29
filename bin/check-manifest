@@ -1,0 +1,953 @@
+#!/usr/bin/env python3
+"""
+bin/check-manifest — the release gate for a records-family/1 module.
+
+Run it before every version bump. It exits 0 only when the Element is
+shippable. It is the rasa.module.tasks v1.0.0 gate (checks 1-9, unchanged in
+spirit) plus five checks that belong to the personal-records family
+(rasa.module.notes, rasa.module.schedule, rasa.module.crm,
+rasa.module.messages):
+
+  1. coverage        every file under content/ + seed/ is registered in rasa.json
+  2. dangling        every rasa.json `from` points at a path that exists
+  3. schema          rasa.json validates (canonical validator if reachable,
+                     else the inline structural checks below)
+  4. policy          every `policy` is one of the five canon §7 values AND is
+                     legal for the section it appears in
+  5. destinations    every `to` is relative, `..`-free and unique
+  6. from-kind       a directory-mirror `from` is a directory; every other
+                     policy's `from` is a file
+  7. versions        VERSION == rasa.json#version == the top CHANGELOG
+                     heading == README.md's version line == the package VERSION
+  8. vocabulary      no canon ELEMENT_CONTRACT §8 forbidden term, repo-wide
+  9. the hard rule   nothing that INSTALLS carries an engineering token — a
+                     firm, a clinic and a novelist read these files
+ 10. family          records.py and the rules file's family block hash to the
+                     values in FAMILY, and every sibling family module found
+                     on disk carries the identical FAMILY
+ 11. offline         no network or process import anywhere under content/bin/
+ 12. schemas         every content/schemas/*.json parses and is well-formed
+                     record law (x-id-prefix / x-title / x-key-order agree)
+ 13. executables     the two installed programs are executable
+ 14. tests           the unittest suite passes (it includes an install smoke:
+                     bin/init into a scratch project, drive the tool, validate)
+
+Checks 8 and 9 honour ALLOWLIST below: an exemption is a named path, a named
+token and a written reason, and every suppressed hit is still printed.
+
+Pure Python 3 standard library.
+Usage:  bin/check-manifest [--quiet] [--no-tests]
+        bin/check-manifest --stamp-family   (after a deliberate, family-wide core change)
+Exit:   0 = shippable, 1 = one or more problems, 2 = the gate could not run.
+"""
+
+import fnmatch
+import json
+import os
+import re
+import subprocess
+import sys
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MANIFEST_PATH = os.path.join(REPO_ROOT, "rasa.json")
+
+# ── this module (the only block that differs between the four family gates) ─
+MODULE = "messages"
+CLI = "messages"
+CHECK = "check-messages"
+PACKAGE = "content/bin/rasa_messages"
+RULES = "content/messages-rules.md"
+FAMILY_SIBLINGS = ("module-notes", "module-schedule", "module-crm", "module-messages")
+# Tokens this module's own subject legitimately uses (removed from HARD_RULE
+# for this module only, each with its reason).
+SUBJECT_TOKENS = {}
+
+# ── canon constants ─────────────────────────────────────────────────────────
+
+# canon ELEMENT_CONTRACT §7. Adding a value here is a canon-level event.
+POLICIES = ("directory-mirror", "file-replace", "opt-in",
+            "skip-if-exists", "init-only-with-sha")
+# §7's "When" column: which policies are legal in which install section.
+SECTION_POLICIES = {
+    "element": ("directory-mirror", "file-replace", "opt-in"),
+    "seed": ("skip-if-exists", "init-only-with-sha"),
+}
+# The policies whose `from` must be a directory. Everything else: a file.
+DIRECTORY_POLICIES = ("directory-mirror",)
+
+KINDS = ("domain", "orchestrator", "module", "core", "kernel",  # orchestrator: retained for pre-SA-023 Elements not yet migrated
+         "frontend", "recipe", "tenant")
+TIERS = ("Free", "Pro", "Enterprise")
+# Canon SA-023 (absorbed 2026-07-09) folded the `orchestrator` kind into
+# `tenant`: eight kinds became seven, and a module now mounts into a tenant or
+# a domain. ELEMENT_CONTRACT §6 upstream reads *subset of ["domain","tenant"]
+# (v1.4+, was ["domain","orchestrator"])*, and RasaOS/schema ships that enum.
+#
+# This inline table is only a FALLBACK for when the schema repo is not on the
+# machine. It drifted once already — written from a stale checkout, it then
+# contradicted the canonical validator it was meant to stand in for, which is
+# the exact failure mode a hardcoded copy invites. When they disagree, the
+# canonical validator is right and this list is stale.
+PARENT_KINDS = ("domain", "tenant")
+
+SEMVER_RE = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)"
+    r"(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?"
+    r"(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$")
+NAME_FIRST_PARTY_RE = re.compile(
+    r"^rasa\.(domain|orchestrator|module|core|kernel|frontend|recipe|tenant)\..+$")
+NAME_TENANT_RE = re.compile(r"^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)*\.tenant\..+$")
+CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)*$")
+PERMISSION_RE = re.compile(r"^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$")
+
+TOP_LEVEL_KEYS = {
+    "$schema", "contract_version", "name", "version", "kind", "aliases",
+    "description", "source", "tier", "capabilities", "permissions",
+    "requires", "provides", "accepts_attachments", "rasa", "element",
+    "seed", "scaffold", "tenant",
+}
+REQUIRED_KEYS = ("$schema", "contract_version", "name", "version", "kind")
+
+# ── the two token tables ────────────────────────────────────────────────────
+
+
+def word(stem):
+    """A whole-word pattern: not glued to a letter, digit, underscore or dash."""
+    return r"(?<![A-Za-z0-9_-])(?:" + stem + r")(?![A-Za-z0-9_-])"
+
+
+# canon ELEMENT_CONTRACT §8 — the vocabulary lock. Repo-wide.
+VOCABULARY = (
+    ("kit", word("kit"), re.I),
+    ("MANIFEST.json", r"MANIFEST\.json", re.I),
+    ("bootstrap/", word("bootstrap") + r"/", re.I),
+    ("foundation.json", word("foundation\\.json"), re.I),
+    ("manifest contract", r"manifest[ \t]+contract", re.I),
+)
+
+# The hard rule, mechanically. Every token below names something only some
+# stacks have. A law firm, a clinic and a novelist must be able to read every
+# shipped file without meeting one of them — so none may appear under content/
+# or seed/. Stack-specific verification belongs in the project-owned
+# .claude/done-gate.md, which is why that one file is allowlisted below.
+HARD_RULE = (
+    ("git", word(r"git"), re.I),
+    ("commit", word(r"commits?|committed|committing"), re.I),
+    ("branch", word(r"branch|branches|branching"), re.I),
+    ("merge", word(r"merges?|merged|merging"), re.I),
+    ("pull request", r"pull[ \t]+requests?", re.I),
+    ("PR", word(r"PRs?"), 0),
+    ("build", word(r"builds?|building|built"), re.I),
+    ("compile", word(r"compiles?|compiled|compiling|compiler"), re.I),
+    ("lint", word(r"lints?|linted|linting|linter"), re.I),
+    ("test", word(r"tests?|tested|testing"), re.I),
+    ("CI", word(r"CI"), 0),
+    ("pipeline", word(r"pipelines?"), re.I),
+    ("deploy", word(r"deploys?|deployed|deploying|deployment|deployments"), re.I),
+    ("release", word(r"releases?|released|releasing"), re.I),
+    ("console", word(r"console"), re.I),
+    ("ios", word(r"ios"), re.I),
+    ("android", word(r"android"), re.I),
+    ("web", word(r"web"), re.I),
+    ("backend", word(r"backend|back-end"), re.I),
+    ("frontend", word(r"frontend|front-end"), re.I),
+    ("src", word(r"src"), re.I),
+    ("e2e", word(r"e2e"), re.I),
+    ("feature", word(r"features?"), re.I),
+    ("bug", word(r"bugs?"), re.I),
+    ("chore", word(r"chores?"), re.I),
+    ("hotfix", word(r"hotfix|hotfixes"), re.I),
+    ("sprint", word(r"sprints?"), re.I),
+)
+
+# ── the allowlist ───────────────────────────────────────────────────────────
+# (path glob, token or "*", reason). A hit matching a row is reported as
+# ALLOWED instead of failing. Every row needs a reason a reviewer can weigh.
+ALLOWLIST = (
+    ("bin/check-manifest", "*",
+     "this file IS the scanner: the token tables above are the rule, not a "
+     "violation of it"),
+    ("seed/rasa.lock.json.template", "branch",
+     "the canon rasa.lock.json shape (Spec §6) names source.branch; the key "
+     "is fixed by the Connection Contract, not chosen here"),
+    ("content/bin/*.py", "compile",
+     "Python's re.compile — a standard-library function name, not the "
+     "engineering word; every other token is still scanned in these files"),
+    ("CHANGELOG.md", "kit",
+     "the 0.2.0 entry records that 0.1.2 dropped a kit/ clone into consumer "
+     "trees. Naming a removed defect is not using the vocabulary"),
+    ("tests/*.py", "kit",
+     "the install smoke asserts that NO kit/ clone is created — naming the "
+     "removed path is how the test proves it stays removed"),
+    ("CLAUDE.md", "kit",
+     "the Don't-list names the removed kit/ clone so a future session does "
+     "not reintroduce it"),
+)
+
+# Repo-relative paths never scanned at all (third-party text we do not own).
+SCAN_SKIP = ("LICENSE",)
+
+# ── small helpers ───────────────────────────────────────────────────────────
+
+CRUFT = (".DS_Store", "._*", "*.swp", "*.swo", "*.pyc")
+
+
+def is_cruft(name):
+    return any(fnmatch.fnmatch(name, pat) for pat in CRUFT)
+
+
+def repo_inventory():
+    """Every file in the Element, repo-relative, and how it was found.
+
+    The union of what version control tracks and what is actually on disk.
+    The tracked list alone was the old gap: a file that is present but not
+    yet tracked is invisible to it, and `directory-mirror` will nonetheless
+    install that file into every consumer. The walk alone would miss a
+    tracked file someone deleted without updating the manifest. Take both,
+    and work without either one being available.
+    """
+    # Pruning EVERY hidden directory was a hole: `directory-mirror` is
+    # shutil.copytree, which copies hidden subdirectories happily, so a
+    # `content/task-templates/.hidden/leak.md` shipped to every consumer while
+    # being invisible to both the coverage check and the hard-rule scan — the
+    # gate printed "Shippable". Verified by reproduction. Under content/ and
+    # seed/ — the only trees that actually ship — nothing is pruned but the
+    # named tooling dirs. Elsewhere the broad hidden-prune still applies, so
+    # .git, worktrees and virtualenvs stay out of the walk.
+    NEVER_WALK = ("node_modules", "__pycache__", ".git")
+    SHIPPED_ROOTS = (os.path.join(REPO_ROOT, "content"), os.path.join(REPO_ROOT, "seed"))
+
+    walked = []
+    for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
+        in_shipped = any(dirpath == r or dirpath.startswith(r + os.sep)
+                         for r in SHIPPED_ROOTS)
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in NEVER_WALK and (in_shipped or not d.startswith("."))
+        )
+        for name in sorted(filenames):
+            if is_cruft(name):
+                continue
+            full = os.path.join(dirpath, name)
+            walked.append(os.path.relpath(full, REPO_ROOT))
+
+    tracked = []
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", REPO_ROOT, "ls-files", "-z"],
+            stderr=subprocess.DEVNULL)
+        tracked = [p for p in out.decode("utf-8").split("\0")
+                   if p and not is_cruft(os.path.basename(p))]
+    except (OSError, subprocess.CalledProcessError, UnicodeDecodeError):
+        pass
+
+    if tracked:
+        source = "%d on disk ∪ %d tracked" % (len(walked), len(tracked))
+    else:
+        source = "%d on disk (no version control available)" % len(walked)
+    return sorted(set(walked) | set(tracked)), source
+
+
+SCAN_CAP = 8 * 1024 * 1024
+
+# Files a token scan could not read. A BINARY file is a legitimate skip — there
+# are no source tokens in a PNG. A file that is oversized or not valid UTF-8 is
+# NOT: it ships, a reader will read it, and the gate simply cannot see inside.
+# Skipping those silently made "N files scanned" a lie and left the hard rule
+# bypassable by a single oversized file, so they are collected and failed on.
+UNSCANNABLE = []
+
+
+def read_text(rel, record_unscannable=False):
+    """File contents as text, or None when it cannot be scanned.
+
+    With record_unscannable=True, anything skipped for a reason OTHER than
+    being binary is appended to UNSCANNABLE so the caller can fail on it.
+    """
+    full = os.path.join(REPO_ROOT, rel)
+
+    def skip(reason):
+        if record_unscannable:
+            UNSCANNABLE.append((rel, reason))
+        return None
+
+    try:
+        size = os.path.getsize(full)
+        if size > SCAN_CAP:
+            return skip("%.1f MB exceeds the %d MB scan cap"
+                        % (size / 1048576.0, SCAN_CAP // 1048576))
+        with open(full, "rb") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        return skip("unreadable (%s)" % (exc.strerror or exc))
+    if b"\0" in raw:
+        return None  # binary: genuinely nothing for a token scan to find
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return skip("not valid UTF-8")
+
+
+def allowed(rel, token):
+    for glob, tok, reason in ALLOWLIST:
+        if fnmatch.fnmatch(rel, glob) and tok in ("*", token):
+            return reason
+    return None
+
+
+def scan(paths, table):
+    """Run a token table over paths. Returns (hits, allowed_hits)."""
+    compiled = [(name, re.compile(pat, flags)) for name, pat, flags in table]
+    hits, allows = [], []
+    for rel in paths:
+        if rel in SCAN_SKIP:
+            continue
+        text = read_text(rel, record_unscannable=True)
+        if text is None:
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for name, rx in compiled:
+                if rx.search(line):
+                    reason = allowed(rel, name)
+                    record = (rel, lineno, name, line.strip()[:90])
+                    (allows if reason else hits).append(record)
+    return hits, allows
+
+
+# ── the inline schema checks (used when the canonical validator is absent) ──
+
+def inline_schema_checks(manifest):
+    """The subset of rasa.schema.v1.json a stdlib script can enforce.
+
+    Deliberately conservative: it must never fail a manifest the real
+    validator accepts. Its job is to make the schema check meaningful when
+    the schema repo is not on this machine, not to replace it.
+    """
+    bad = []
+
+    def err(msg):
+        bad.append(msg)
+
+    for key in REQUIRED_KEYS:
+        if key not in manifest:
+            err("required top-level key missing: %s" % key)
+    for key in manifest:
+        if key not in TOP_LEVEL_KEYS:
+            err("unknown top-level key (schema forbids additional properties): %s" % key)
+
+    kind = manifest.get("kind")
+    if kind is not None and kind not in KINDS:
+        err("kind %r is not one of the eight canon kinds" % (kind,))
+
+    name = manifest.get("name")
+    if isinstance(name, str):
+        if not (NAME_FIRST_PARTY_RE.match(name)
+                or name in ("rasa.core", "rasa.kernel")
+                or NAME_TENANT_RE.match(name)):
+            err("name %r matches none of the three ElementName forms" % name)
+        if isinstance(kind, str) and NAME_FIRST_PARTY_RE.match(name):
+            if name.split(".")[1] != kind:
+                err("name %r and kind %r disagree" % (name, kind))
+    elif name is not None:
+        err("name must be a string")
+
+    for key in ("version", "contract_version"):
+        value = manifest.get(key)
+        if value is not None and not (isinstance(value, str) and SEMVER_RE.match(value)):
+            err("%s %r is not semver" % (key, value))
+
+    tier = manifest.get("tier")
+    if tier is not None and tier not in TIERS:
+        err("tier %r is not one of %s" % (tier, ", ".join(TIERS)))
+
+    for cap in manifest.get("capabilities", []) or []:
+        if not (isinstance(cap, str) and CAPABILITY_RE.match(cap)):
+            err("capability %r is not a dotted lowercase capability name" % (cap,))
+
+    perms = manifest.get("permissions", []) or []
+    for perm in perms:
+        if not (isinstance(perm, str) and PERMISSION_RE.match(perm)):
+            err("permission %r is not in ns:verb form" % (perm,))
+    if len(set(perms)) != len(perms):
+        err("permissions[] contains duplicates (schema requires uniqueItems)")
+
+    requires = manifest.get("requires", {}) or {}
+    if not isinstance(requires, dict):
+        err("requires must be an object")
+    else:
+        for key in requires:
+            if key not in ("parent_kind", "elements"):
+                err("requires.%s is not a schema-known key" % key)
+        parent_kind = requires.get("parent_kind")
+        if parent_kind is not None:
+            if kind != "module":
+                err("requires.parent_kind is module-kind only (this kind is %r)" % (kind,))
+            if not isinstance(parent_kind, list):
+                err("requires.parent_kind must be an array")
+            else:
+                for value in parent_kind:
+                    if value not in PARENT_KINDS:
+                        err("requires.parent_kind %r is not one of %s"
+                            % (value, ", ".join(PARENT_KINDS)))
+                if len(set(parent_kind)) != len(parent_kind):
+                    err("requires.parent_kind contains duplicates")
+
+    source = manifest.get("source", {}) or {}
+    if isinstance(source, dict):
+        for key in source:
+            if key not in ("repo", "branch", "tag", "commit"):
+                err("source.%s is not a schema-known key" % key)
+
+    scaffold = manifest.get("scaffold", {}) or {}
+    if isinstance(scaffold, dict):
+        for key in scaffold:
+            if key not in ("description", "directories"):
+                err("scaffold.%s is not a schema-known key" % key)
+
+    for section in ("element", "seed"):
+        block = manifest.get(section)
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            err("%s must be an object" % section)
+            continue
+        for index, entry in enumerate(block.get("files", []) or []):
+            where = "%s.files[%d]" % (section, index)
+            if not isinstance(entry, dict):
+                err("%s is not an object" % where)
+                continue
+            for key in ("from", "to", "policy"):
+                if key not in entry:
+                    err("%s is missing required key %r" % (where, key))
+            for key in entry:
+                if key not in ("from", "to", "policy", "note"):
+                    err("%s has key %r (schema forbids additional properties)"
+                        % (where, key))
+    return bad
+
+
+def find_schema_dir():
+    """Locate the RasaOS/schema sibling: $RASA_SCHEMA_DIR, else walk upward."""
+    env = os.environ.get("RASA_SCHEMA_DIR")
+    if env and os.path.isfile(os.path.join(env, "rasa.schema.v1.json")):
+        return env
+    here = REPO_ROOT
+    while True:
+        candidate = os.path.join(here, "schema")
+        if os.path.isfile(os.path.join(candidate, "rasa.schema.v1.json")):
+            return candidate
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None
+        here = parent
+
+
+def run_canonical_validator():
+    """(ok, detail) from schema/bin/validate, or (None, why) when unavailable.
+
+    Never raises, never blocks: a missing schema repo, a missing jsonschema
+    dependency, or a validator that will not start all degrade to None.
+    """
+    schema_dir = find_schema_dir()
+    if not schema_dir:
+        return None, "no RasaOS/schema sibling found (set $RASA_SCHEMA_DIR to point at one)"
+    validate = os.path.join(schema_dir, "bin", "validate")
+    if not os.path.isfile(validate):
+        return None, "%s has no bin/validate" % schema_dir
+
+    interpreters = [
+        os.path.join(schema_dir, ".venv", "bin", "python3"),
+        os.path.join(schema_dir, "venv", "bin", "python3"),
+        sys.executable or "python3",
+    ]
+    last = "no interpreter with jsonschema available"
+    for interpreter in interpreters:
+        if not (interpreter == sys.executable or os.path.isfile(interpreter)):
+            continue
+        try:
+            proc = subprocess.run(
+                [interpreter, validate, MANIFEST_PATH],
+                cwd=schema_dir, capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.SubprocessError) as exc:
+            last = "could not run %s (%s)" % (validate, exc)
+            continue
+        output = (proc.stdout or "") + (proc.stderr or "")
+        if proc.returncode == 2 and "jsonschema" in output:
+            last = "jsonschema not installed for %s" % interpreter
+            continue
+        return proc.returncode == 0, output.strip() or ("exit %d" % proc.returncode)
+    return None, last
+
+
+# ── the family checks (10-14) ───────────────────────────────────────────────
+
+FORBIDDEN_IMPORTS = re.compile(
+    r"^\s*(?:import|from)\s+(socket|smtplib|urllib|urllib2|urllib3|http|httplib|ftplib|"
+    r"imaplib|poplib|nntplib|telnetlib|ssl|subprocess|asyncio|xmlrpc|requests|webbrowser|"
+    r"multiprocessing)\b", re.M)
+DOC_BEGIN = "<!-- BEGIN records-family/1 -->"
+DOC_END = "<!-- END records-family/1 -->"
+
+
+def sha256_file(rel):
+    import hashlib
+    with open(os.path.join(REPO_ROOT, rel), "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
+
+
+def family_block_sha(text):
+    import hashlib
+    b, e = text.find(DOC_BEGIN), text.find(DOC_END)
+    if b < 0 or e < b:
+        return None
+    return hashlib.sha256(text[b:e + len(DOC_END)].encode("utf-8")).hexdigest()
+
+
+def read_family(path):
+    out = {}
+    try:
+        with open(path) as handle:
+            lines = handle.read().split("\n")
+    except OSError:
+        return None
+    out["family"] = lines[0].strip() if lines else ""
+    for line in lines[1:]:
+        if "=" in line:
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def family_checks(report, paths, entries, manifest):
+    # 10. family
+    problems = []
+    fam_path = os.path.join(REPO_ROOT, PACKAGE, "FAMILY")
+    fam = read_family(fam_path)
+    core_rel = PACKAGE + "/records.py"
+    note = None
+    if fam is None:
+        problems.append("%s/FAMILY is missing" % PACKAGE)
+    else:
+        if fam.get("family") != "records-family/1":
+            problems.append("FAMILY line 1 must be records-family/1 (is %r)" % fam.get("family"))
+        if not os.path.isfile(os.path.join(REPO_ROOT, core_rel)):
+            problems.append("%s is missing" % core_rel)
+        elif sha256_file(core_rel) != fam.get("core"):
+            problems.append("%s does not hash to FAMILY core= (edit the core in all four modules "
+                            "in lockstep, then restamp every FAMILY)" % core_rel)
+        rules = read_text(RULES) or ""
+        doc_sha = family_block_sha(rules)
+        if doc_sha is None:
+            problems.append("%s has no family block (%s ... %s)" % (RULES, DOC_BEGIN, DOC_END))
+        elif doc_sha != fam.get("doc"):
+            problems.append("the family block in %s does not hash to FAMILY doc=" % RULES)
+        parent = os.path.dirname(REPO_ROOT)
+        seen, differ = [], []
+        for sib in FAMILY_SIBLINGS:
+            sib_root = os.path.join(parent, sib)
+            if os.path.realpath(sib_root) == os.path.realpath(REPO_ROOT):
+                continue
+            hits = [os.path.join(sib_root, "content", "bin", d, "FAMILY")
+                    for d in (os.listdir(os.path.join(sib_root, "content", "bin"))
+                              if os.path.isdir(os.path.join(sib_root, "content", "bin")) else [])
+                    if d.startswith("rasa_")]
+            if not hits:
+                continue
+            other = read_family(hits[0])
+            seen.append(sib)
+            if other != fam:
+                differ.append(sib)
+        for sib in differ:
+            problems.append("sibling %s carries a different FAMILY — the core or the family block "
+                            "has drifted between modules" % sib)
+        note = "siblings compared: %s" % (", ".join(seen) if seen else "none on disk")
+    report.check("family        core + family block match FAMILY; siblings agree", problems,
+                 note=note)
+
+    # 11. offline
+    hits = []
+    for rel in paths:
+        if not rel.startswith("content/bin/"):
+            continue
+        text = read_text(rel)
+        if text is None:
+            continue
+        if rel.endswith(".py") or text.startswith("#!"):
+            for m in FORBIDDEN_IMPORTS.finditer(text):
+                line = text[:m.start()].count("\n") + 1
+                hits.append("%s:%d imports %s — the family never opens a network connection or "
+                            "starts a process" % (rel, line, m.group(1)))
+    report.check("offline       no network/process import under content/bin/", hits)
+
+    # 12. schemas
+    problems = []
+    schema_files = [p for p in paths if p.startswith("content/schemas/") and p.endswith(".json")]
+    for rel in schema_files:
+        try:
+            with open(os.path.join(REPO_ROOT, rel)) as handle:
+                sch = json.load(handle)
+        except (OSError, ValueError) as exc:
+            problems.append("%s does not parse: %s" % (rel, exc))
+            continue
+        props = list((sch.get("properties") or {}).keys())
+        order = sch.get("x-key-order")
+        if order is None or sorted(order) != sorted(props) or len(set(order)) != len(order):
+            problems.append("%s: x-key-order must list exactly the properties, once each" % rel)
+        if sch.get("x-kind") == "config":
+            continue
+        if not sch.get("x-id-prefix"):
+            problems.append("%s: a record schema declares x-id-prefix" % rel)
+        if sch.get("x-title") not in ("required", "none"):
+            problems.append("%s: x-title must be 'required' or 'none'" % rel)
+        for key in ("id", "created", "created_by", "updated"):
+            if key not in props:
+                problems.append("%s: every family record has '%s'" % (rel, key))
+        if sch.get("additionalProperties") is not False:
+            problems.append("%s: additionalProperties must be false (extensions go under x-)" % rel)
+        mut = sch.get("x-mutable-when-frozen")
+        if mut is not None and any(k not in props for k in mut):
+            problems.append("%s: x-mutable-when-frozen names keys that are not properties" % rel)
+    report.check("schemas       record law is well-formed", problems,
+                 note="%d schema file(s)" % len(schema_files))
+
+    # 13. executables
+    problems = []
+    for prog in (CLI, CHECK):
+        full = os.path.join(REPO_ROOT, "content", "bin", prog)
+        if not os.path.isfile(full):
+            problems.append("content/bin/%s is missing" % prog)
+        elif not os.access(full, os.X_OK):
+            problems.append("content/bin/%s is not executable (chmod +x); an install would land a "
+                            "program nobody can run" % prog)
+    # The inventory never walks __pycache__, so bytecode an author's run left under
+    # content/ would ship via directory-mirror unseen. Look for it directly.
+    for tree in ("content", "seed"):
+        for dirpath, dirnames, filenames in os.walk(os.path.join(REPO_ROOT, tree)):
+            for d in dirnames:
+                if d == "__pycache__":
+                    problems.append("%s/ — bytecode on disk would be installed; delete it (run "
+                                    "Python with -B)" % os.path.relpath(os.path.join(dirpath, d),
+                                                                       REPO_ROOT))
+            for f in filenames:
+                if f.endswith((".pyc", ".pyo")):
+                    problems.append("%s — bytecode would be installed" % os.path.relpath(
+                        os.path.join(dirpath, f), REPO_ROOT))
+    report.check("executables   the programs are executable; no bytecode ships", problems)
+
+
+def run_tests(report):
+    tests_dir = os.path.join(REPO_ROOT, "tests")
+    if not os.path.isdir(tests_dir):
+        report.check("tests         the unittest suite passes", ["tests/ is missing"])
+        return
+    import subprocess as _sp  # the gate may start a process; the shipped tools may not
+    env = dict(os.environ)
+    for k in ("RASA_PROJECT_ROOT", "RASA_ACTOR", "RASA_TODAY", "RASA_NOW"):
+        env.pop(k, None)
+    proc = _sp.run([sys.executable or "python3", "-B", "-m", "unittest", "discover", "-s",
+                    tests_dir], cwd=REPO_ROOT, capture_output=True, text=True,
+                   env=env, timeout=900)
+    tail = (proc.stderr or proc.stdout or "").strip().split("\n")
+    summary = next((l for l in reversed(tail) if l.startswith("Ran ")), "")
+    if proc.returncode != 0:
+        fails = [l for l in tail if l.startswith(("FAIL:", "ERROR:"))] or tail[-5:]
+        report.check("tests         the unittest suite passes", fails, note=summary)
+    else:
+        report.check("tests         the unittest suite passes", [], note=summary)
+
+
+# ── the report ──────────────────────────────────────────────────────────────
+
+MAX_SHOWN = 20  # per check, so one broken rule cannot bury the other eight
+
+
+class Report(object):
+    def __init__(self, quiet=False):
+        self.rows = []
+        self.problems = 0
+        self.quiet = quiet
+
+    def check(self, name, failures, note=None, skipped=False):
+        if skipped:
+            status = "SKIP"
+        elif failures:
+            status = "FAIL"
+            self.problems += len(failures)
+        else:
+            status = "ok"
+        self.rows.append((status, name, list(failures), note))
+
+    def emit(self):
+        print("bin/check-manifest — release gate for %s"
+              % os.path.basename(REPO_ROOT))
+        print()
+        for status, name, failures, note in self.rows:
+            line = "  %-4s %s" % (status, name)
+            if note:
+                line += "  — %s" % note
+            print(line)
+            if failures and not self.quiet:
+                shown = failures[:MAX_SHOWN]
+                for failure in shown:
+                    print("         x %s" % failure)
+                if len(failures) > len(shown):
+                    print("         … and %d more (this check alone)"
+                          % (len(failures) - len(shown)))
+        print()
+        if self.problems:
+            print("FAIL %d problem(s). This Element is not shippable."
+                  % self.problems)
+        else:
+            print("OK   every check passed. Shippable.")
+        return 1 if self.problems else 0
+
+
+def stamp_family():
+    """Write FAMILY from the current core + family block. Do this only when the
+    core or the family block changed deliberately — in all four modules at once."""
+    rules = read_text(RULES) or ""
+    doc = family_block_sha(rules)
+    if doc is None:
+        print("ERROR: %s has no family block" % RULES, file=sys.stderr)
+        return 2
+    path = os.path.join(REPO_ROOT, PACKAGE, "FAMILY")
+    with open(path, "w") as handle:
+        handle.write("records-family/1\ncore=%s\ndoc=%s\n"
+                     % (sha256_file(PACKAGE + "/records.py"), doc))
+    print("stamped %s" % os.path.relpath(path, REPO_ROOT))
+    return 0
+
+
+def main():
+    quiet = "--quiet" in sys.argv[1:]
+    if "--stamp-family" in sys.argv[1:]:
+        return stamp_family()
+
+    if not os.path.isfile(MANIFEST_PATH):
+        print("ERROR: rasa.json not found at %s" % MANIFEST_PATH, file=sys.stderr)
+        return 2
+    try:
+        with open(MANIFEST_PATH) as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError) as exc:
+        print("ERROR: could not parse rasa.json: %s" % exc, file=sys.stderr)
+        return 2
+
+    report = Report(quiet=quiet)
+    paths, inventory_source = repo_inventory()
+
+    entries = []  # (section, index, entry)
+    for section in ("element", "seed"):
+        block = manifest.get(section) or {}
+        for index, entry in enumerate(block.get("files", []) or []):
+            if isinstance(entry, dict):
+                entries.append((section, index, entry))
+
+    # ── 1. coverage ────────────────────────────────────────────────────────
+    froms = set()
+    for _, _, entry in entries:
+        value = entry.get("from")
+        if isinstance(value, str):
+            froms.add(value.rstrip("/"))
+
+    def covered(path):
+        if path in froms:
+            return True
+        parts = path.split("/")
+        return any("/".join(parts[:i]) in froms for i in range(1, len(parts)))
+
+    shipped = [p for p in paths
+               if (p.startswith("content/") or p.startswith("seed/"))
+               and not is_cruft(os.path.basename(p))]
+    uncovered = ["%s — present under content/ or seed/ and registered nowhere in rasa.json" % p
+                 for p in shipped if not covered(p)]
+    report.check("coverage      every content/ + seed/ file is registered",
+                 uncovered,
+                 note="%d shipped files; inventory: %s"
+                      % (len(shipped), inventory_source))
+
+    # ── 2. dangling ────────────────────────────────────────────────────────
+    # `from` must exist AND stay inside the Element. os.path.join(root, "/etc/x")
+    # silently discards the root and returns "/etc/x", so an absolute — or
+    # ../-bearing — `from` would resolve to a real file outside the Element and
+    # sail through an existence check. Same class as the `to` escape in bin/init.
+    dangling = []
+    element_root = os.path.realpath(REPO_ROOT)
+    for section, index, entry in entries:
+        raw_from = str(entry.get("from"))
+        label = "%s.files[%d] `from`" % (section, index)
+        if os.path.isabs(raw_from):
+            dangling.append("%s is absolute, so it escapes the Element: %s"
+                            % (label, raw_from))
+            continue
+        full = os.path.realpath(os.path.join(REPO_ROOT, raw_from))
+        if full != element_root and not full.startswith(element_root + os.sep):
+            dangling.append("%s resolves outside the Element: %s -> %s"
+                            % (label, raw_from, full))
+            continue
+        if not os.path.exists(full):
+            dangling.append("%s does not exist: %s" % (label, raw_from))
+    report.check("dangling      every rasa.json `from` exists, inside the Element",
+                 dangling)
+
+    # ── 3. schema ──────────────────────────────────────────────────────────
+    inline = inline_schema_checks(manifest)
+    external_ok, external_detail = run_canonical_validator()
+    if external_ok is False:
+        inline = inline + ["canonical validator: %s" % external_detail.replace("\n", " | ")]
+        note = "canonical validator ran"
+    elif external_ok is True:
+        note = "canonical validator PASS + inline checks"
+    else:
+        note = "inline checks only — %s" % external_detail
+    report.check("schema        rasa.json validates", inline, note=note)
+
+    # ── 4. policy ──────────────────────────────────────────────────────────
+    policy_problems = []
+    for section, index, entry in entries:
+        policy = entry.get("policy")
+        where = "%s.files[%d] (%s)" % (section, index, entry.get("from"))
+        if policy not in POLICIES:
+            policy_problems.append(
+                "%s: policy %r is not one of the five canon §7 values"
+                % (where, policy))
+        elif policy not in SECTION_POLICIES[section]:
+            policy_problems.append(
+                "%s: policy %r is not legal in %s.files[] (legal: %s)"
+                % (where, policy, section, ", ".join(SECTION_POLICIES[section])))
+    report.check("policy        every policy is canon §7 and legal for its section",
+                 policy_problems)
+
+    # ── 5. destinations ────────────────────────────────────────────────────
+    dest_problems = []
+    seen = {}
+    for section, index, entry in entries:
+        to = entry.get("to")
+        where = "%s.files[%d]" % (section, index)
+        if not isinstance(to, str) or not to:
+            dest_problems.append("%s: `to` is missing or empty" % where)
+            continue
+        if os.path.isabs(to) or to.startswith("~"):
+            dest_problems.append("%s: `to` is not relative: %s" % (where, to))
+        if ".." in to.split("/"):
+            dest_problems.append("%s: `to` escapes the target with `..`: %s" % (where, to))
+        key = to.rstrip("/")
+        if key in seen:
+            dest_problems.append(
+                "%s: `to` collides with %s — both write %s" % (where, seen[key], to))
+        else:
+            seen[key] = where
+    report.check("destinations  every `to` is relative, ..-free and unique",
+                 dest_problems)
+
+    # ── 6. from-kind ───────────────────────────────────────────────────────
+    kind_problems = []
+    for section, index, entry in entries:
+        source = str(entry.get("from"))
+        full = os.path.join(REPO_ROOT, source)
+        if not os.path.exists(full):
+            continue  # already reported by check 2
+        policy = entry.get("policy")
+        where = "%s.files[%d]" % (section, index)
+        if policy in DIRECTORY_POLICIES and not os.path.isdir(full):
+            kind_problems.append("%s: policy %s needs a directory, %s is a file"
+                                 % (where, policy, source))
+        elif policy not in DIRECTORY_POLICIES and os.path.isdir(full):
+            kind_problems.append("%s: policy %s needs a file, %s is a directory"
+                                 % (where, policy, source))
+    report.check("from-kind     each `from`'s kind matches its policy", kind_problems)
+
+    # ── 7. versions ────────────────────────────────────────────────────────
+    version_problems = []
+    declared = manifest.get("version")
+    version_file = read_text("VERSION")
+    version_file = version_file.strip() if version_file else None
+    changelog = read_text("CHANGELOG.md")
+    readme = read_text("README.md")
+
+    changelog_version = None
+    if changelog:
+        match = re.search(r"^##[ \t]+v?(\S+)", changelog, re.M)
+        if match:
+            changelog_version = match.group(1)
+    readme_version = None
+    if readme:
+        matches = re.findall(r"^\s*[-*]?\s*\*\*Version:\*\*\s+v?(\S+)\s*$", readme, re.M)
+        if len(matches) == 1:
+            readme_version = matches[0]
+        elif len(matches) > 1:
+            version_problems.append(
+                "README.md declares %d version lines; exactly one is required"
+                % len(matches))
+
+    model_text = read_text(PACKAGE + "/model.py") or ""
+    model_match = re.search(r'^VERSION = "([^"]+)"', model_text, re.M)
+    model_version = model_match.group(1) if model_match else None
+    for label, value in (("VERSION", version_file),
+                         ("the top CHANGELOG.md heading", changelog_version),
+                         ("README.md's `**Version:**` line", readme_version),
+                         ("%s/model.py VERSION" % PACKAGE, model_version)):
+        if value is None:
+            version_problems.append("could not read a version from %s" % label)
+        elif value != declared:
+            version_problems.append(
+                "%s says %s; rasa.json#version says %s" % (label, value, declared))
+    report.check("versions      VERSION == rasa.json == CHANGELOG == README == package",
+                 version_problems, note="rasa.json#version = %s" % declared)
+
+    # ── 8. vocabulary (canon §8, repo-wide) ────────────────────────────────
+    vocab_hits, vocab_allowed = scan(paths, VOCABULARY)
+    report.check("vocabulary    no canon §8 forbidden term",
+                 ["%s:%d  %s  |  %s" % hit for hit in vocab_hits],
+                 note="%d allowed by ALLOWLIST" % len(vocab_allowed))
+
+    # ── 9. the hard rule ───────────────────────────────────────────────────
+    installing = [str(e.get("from")).rstrip("/") for _, _, e in entries
+                  if e.get("policy") != "opt-in"]
+
+    def installs(path):
+        return any(path == f or path.startswith(f + "/") for f in installing)
+
+    shipped_paths = [p for p in paths
+                     if (p.startswith("content/") or p.startswith("seed/")) and installs(p)]
+    del UNSCANNABLE[:]
+    table = tuple(row for row in HARD_RULE if row[0] not in SUBJECT_TOKENS)
+    hard_hits, hard_allowed = scan(shipped_paths, table)
+    # A shipped file the scan could not read is a hole in the rule, not a pass:
+    # one oversized file would otherwise carry any content past the gate.
+    blind = ["%s — the hard-rule scan could not read this file: %s"
+             % (rel, reason) for rel, reason in UNSCANNABLE]
+    report.check("hard-rule     nothing that installs carries an engineering token",
+                 ["%s:%d  %s  |  %s" % hit for hit in hard_hits] + blind,
+                 note="%d installing files scanned, %d unreadable, %d allowed by ALLOWLIST%s"
+                      % (len(shipped_paths) - len(blind), len(blind), len(hard_allowed),
+                         ("; subject tokens: " + ", ".join(sorted(SUBJECT_TOKENS)))
+                         if SUBJECT_TOKENS else ""))
+
+    family_checks(report, paths, entries, manifest)
+    if "--no-tests" in sys.argv[1:]:
+        report.check("tests         the unittest suite passes", [], skipped=True,
+                     note="--no-tests given")
+    else:
+        run_tests(report)
+
+    exit_code = report.emit()
+
+    if (vocab_allowed or hard_allowed) and not quiet:
+        print()
+        print("ALLOWED — suppressed by ALLOWLIST in bin/check-manifest:")
+        tally = {}
+        for rel, _lineno, token, _text in vocab_allowed + hard_allowed:
+            tally[(rel, token)] = tally.get((rel, token), 0) + 1
+        for rel, token in sorted(tally):
+            print("  ~  %-34s %-14s %d hit(s)" % (rel, token, tally[(rel, token)]))
+        for glob, tok, reason in ALLOWLIST:
+            if any(fnmatch.fnmatch(rel, glob) and tok in ("*", token)
+                   for rel, token in tally):
+                print("     %s [%s] — %s" % (glob, tok, reason))
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

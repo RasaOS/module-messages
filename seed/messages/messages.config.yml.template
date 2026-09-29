@@ -1,0 +1,69 @@
+# messages/messages.config.yml — what this project declares to rasa.module.messages.
+#
+# PARSING. Read by the same strict parser as every message (records-family/1):
+#   * comments are WHOLE lines. A '#' after a value is an error, not a comment.
+#   * a value is text, a flow list [a, b], a block list of {k: v} maps, or
+#     omitted. To say nothing, omit the key.
+#   * inside {k: v}, write a comma as , and quote the value:
+#       {id: home-post, channel: post, address: "Me, 1 Main St"}
+#     (the family parser splits a map on every comma it sees).
+#
+# Every key except `schema` is optional, and a project with no config file at
+# all is valid — with ONE exception: nothing is written as YOU until an
+# identity is declared for that channel. Drafting, replying, marking a draft
+# sent, logging a message you sent and importing messages you sent all refuse
+# without one. See .claude/messages-gate.md for why.
+#
+# DECLARE TO CONSTRAIN. Every list below works the same way: leave it empty
+# and anything well-formed is accepted; fill it and it becomes a closed
+# vocabulary the validator holds every record to.
+
+schema: rasa.module.messages/1
+
+
+# identities — THE HARD-STOP. Your own addresses, one per line:
+#   {id: <a short name>, channel: email | text | chat | voice | post, address: <yours>}
+# optionally with card: CARD-nnnn (your own card in rasa.module.crm).
+# The address is the literal one you write from: a draft carries it as `from`.
+# Two identities on one channel? The tools ask which, with --as <id>.
+# Declaring an identity makes writing possible; .claude/messages-gate.md says
+# whether the assistant is allowed to.
+#
+# identities:
+#   - {id: home, channel: email, address: me@example.org}
+#   - {id: work, channel: email, address: me@firm.example}
+#   - {id: cell, channel: text, address: +1 555 010 0100}
+#   - {id: cell-calls, channel: voice, address: +1 555 010 0100}
+#   - {id: team-chat, channel: chat, address: "slack:U0123ABC"}
+#   - {id: home-post, channel: post, address: "Me, 1 Main St, Springfield"}
+
+
+# channels — which of the five channels this project keeps:
+# email, text, chat, voice, post. Empty: all five.
+#   channels: [email, voice, post]
+channels: []
+
+# services — the chat services (for kind: chat).
+#   services: [slack, whatsapp, signal, teams]
+services: []
+
+# labels — thread labels.
+#   labels: [family, bills, clients, urgent]
+labels: []
+
+
+# stale_after — days after which a message you sent, with no answer, shows
+# as "waiting". Default 7.
+# stale_after: 7
+
+# timezone — the zone a wall-clock time you type ('2026-09-28 14:00',
+# 'fri 9am') is read in. Times given with an offset, and 'now', need none.
+# timezone: America/New_York
+
+
+# actors — who may appear in created_by and the history. Empty: any handle.
+#   actors: [chazz, claude]
+actors: []
+
+# default_actor — used when neither --by nor $RASA_ACTOR is given.
+# default_actor: chazz
